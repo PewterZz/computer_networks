@@ -203,6 +203,7 @@ def receive_requests(timeout):
 
             else:
                 print("msg: " + data.decode())
+                UDPSenSocket.sendto(b'', addr)
 
         except Exception as e:
             print(f"Rejected because {e}")
