@@ -1,3 +1,4 @@
+
 import socket
 import psutil
 import multiprocessing
@@ -161,10 +162,51 @@ def receive_requests(timeout, ip):
                 if os.path.exists(file_path) and os.path.isfile(file_path):
                     with open(file_path, "r") as f:
                        file_content = f.read()
-                    response = ("NOT HTTP/1.0 9000 OKAY\nContent-Type: text/html\n\n" + file_content).encode()
+                    
+                    segments = divide_data(file_content.encode(), mss-100)
+                    if len(segments) <= 1:
+                        response = ("NOT HTTP/1.0 9000 OKAY\nContent-Type: text/html\n\n" + file_content).encode()
+                        UDPRecSocket.sendto(response, addr)
+                    
+                    else:
+                        temp_rec = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        temp_rec.bind((ip, port + 2))
+                        temp_rec.settimeout(timeout * 2)
+                        
+                        temp_queue = multiprocessing.Queue()
+                        temp_recv = multiprocessing.Process(target=receive_datacks, args=(len(segments), mss, temp_queue, temp_rec))
+                        temp_recv.start()
+
+                        header = f"AWAIT {len(file_content)} {len(segments)} NOT HTTP/1.0 9000 OKAY\nContent-Type: text/html\n\nSending multiple packets"
+                        UDPRecSocket.sendto(header.encode(), addr)
+                        for segment in segments:
+                            print("Sending " + str(segment[0]))
+                            UDPRecSocket.sendto(pickle.dumps(segment), addr)
+
+                        missing_packets = temp_queue.get()
+                        if missing_packets != []:
+                            print("Missing packets: " + str(missing_packets))
+
+                        while len(missing_packets) > 0:
+                            for i in missing_packets:
+                                print("Sending Again " + str(i))
+                                UDPSenSocket.sendto(pickle.dumps(segments[i]), addr)
+
+                            missing_packets = temp_queue.get()
+                            if missing_packets == []:
+                                break
+                            print("Missing packets: " + str(missing_packets))
+
+                        UDPSenSocket.sendto(b'END', addr)
+                        print("Sent all segments")
+
+
+                        temp_recv.join()
+                        temp_rec.close()
+                            
                 else:
                     response = "File not found".encode()
-                UDPRecSocket.sendto(response, addr)
+                    UDPRecSocket.sendto(response, addr)
 
             elif data.decode().startswith("PUTTING") and state == 1:
                 print(data.decode())
@@ -255,7 +297,7 @@ def send_requests(cmd, shared_mem, segments, timeout, ip):
 
                         if len(segments) <= 1:
                             print("Sending 0")
-                            if random.randint(0,100) < 5:
+                            if random.randint(0,100) < 10:
                                 UDPSenSocket.sendto(pickle.dumps(segments[0]), (peer_ip, peer_port))
                             else:
                                 print("Packet lost")
@@ -283,7 +325,7 @@ def send_requests(cmd, shared_mem, segments, timeout, ip):
                         
                         else:
                             for segment in segments:
-                                if random.randint(0, 100) < 0.001:
+                                if random.randint(0, 100) < 10:
                                     print("Packet lost")
                                     continue
                                 print("Sending " + str(segment[0]))
@@ -313,11 +355,43 @@ def send_requests(cmd, shared_mem, segments, timeout, ip):
                         #send command to peer
                         UDPSenSocket.sendto(cmd.encode(), (peer_ip, peer_port))
                         data, addr = UDPSenSocket.recvfrom(mss)
+                        print(data.decode())
 
 
                         #receive response from peer
                     data, addr = UDPSenSocket.recvfrom(mss)
-                    print(data.decode())
+                    if data.decode().startswith("NOT HTTP"):
+                        print(data.decode())
+                    
+                    elif data.decode().startswith("AWAIT"):
+                        print(data.decode())
+                        num_segments = int(data.decode().split()[2])
+                        file_size = int(data.decode().split()[1])
+                        segments = []
+                        try:
+                            body, addr = UDPSenSocket.recvfrom(mss)
+                        except Exception as e:
+                            body = b'nothing'
+                        while body != b'END':
+                            if body != b'nothing':
+                                print(pickle.loads(body))
+                                UDPSenSocket.sendto(("DATACK " + str(pickle.loads(body)[0])).encode(), (peer_ip, peer_port + 2))
+                                segments.append(pickle.loads(body))
+                            try:
+                                body, addr = UDPSenSocket.recvfrom(mss)
+                                if body == b'END':
+                                    break
+                            except Exception as e:
+                                body = b'nothing'
+                                print("Packet Loss Detected")
+
+                        print("Received all segments")
+                        received_data = reassemble_data(segments, mss-100, file_size)
+
+                        print("Reassembled data:")
+                        print(received_data.decode()) 
+                    else:
+                        print(data.decode())
                     return
                         
                 except Exception as e:
@@ -385,5 +459,6 @@ if __name__ == '__main__':
     UDPRecSocket.close()
     UDPSenSocket.close()
     recv_process.terminate()
+
 
 
